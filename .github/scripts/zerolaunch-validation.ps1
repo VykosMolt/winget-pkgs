@@ -12,9 +12,23 @@ $result = [ordered]@{
 
 try {
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        Install-Module -Name Microsoft.WinGet.Client -Scope CurrentUser -Force -Repository PSGallery
-        Import-Module Microsoft.WinGet.Client
-        Repair-WinGetPackageManager -AllUsers -Version '1.29.380' -Force -Verbose
+        $release = Invoke-RestMethod 'https://api.github.com/repos/microsoft/winget-cli/releases/tags/v1.29.380' -Headers @{ Authorization = "Bearer $env:GITHUB_TOKEN" }
+        $bundle = Join-Path $env:RUNNER_TEMP 'DesktopAppInstaller.msixbundle'
+        $dependenciesZip = Join-Path $env:RUNNER_TEMP 'DesktopAppInstaller_Dependencies.zip'
+        $bundleAsset = $release.assets | Where-Object name -eq 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle'
+        $dependenciesAsset = $release.assets | Where-Object name -eq 'DesktopAppInstaller_Dependencies.zip'
+        Invoke-WebRequest $bundleAsset.browser_download_url -OutFile $bundle
+        Invoke-WebRequest $dependenciesAsset.browser_download_url -OutFile $dependenciesZip
+        $dependenciesDirectory = Join-Path $env:RUNNER_TEMP 'winget-dependencies'
+        Expand-Archive $dependenciesZip $dependenciesDirectory
+        $dependencies = @(Get-ChildItem $dependenciesDirectory -Recurse -File | Where-Object {
+            $_.Extension -in @('.appx', '.msix') -and $_.FullName -match "[\\/]$($env:TARGET_ARCHITECTURE)[\\/]"
+        } | Select-Object -ExpandProperty FullName)
+        if ($dependencies.Count -eq 0) { throw 'No native WinGet dependency packages found' }
+        Add-AppxPackage -Path $bundle -DependencyPath $dependencies
+        $installation = Get-AppxPackage -Name Microsoft.DesktopAppInstaller
+        if (-not $installation) { throw 'WinGet package was not registered' }
+        $env:PATH = "$($installation.InstallLocation);$env:PATH"
     }
     winget --info
     if ($LASTEXITCODE -ne 0) { throw 'winget bootstrap failed' }
