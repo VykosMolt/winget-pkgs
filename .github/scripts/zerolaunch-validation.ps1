@@ -25,6 +25,9 @@ try {
             $_.Extension -in @('.appx', '.msix') -and $_.FullName -match "[\\/]$($env:TARGET_ARCHITECTURE)[\\/]"
         } | Select-Object -ExpandProperty FullName)
         if ($dependencies.Count -eq 0) { throw 'No native WinGet dependency packages found' }
+        if ([Environment]::OSVersion.Version.Build -lt 22000) {
+            Import-Module Appx -UseWindowsPowerShell
+        }
         Add-AppxPackage -Path $bundle -DependencyPath $dependencies
         $installation = Get-AppxPackage -Name Microsoft.DesktopAppInstaller
         if (-not $installation) { throw 'WinGet package was not registered' }
@@ -73,6 +76,25 @@ try {
         $result["system_$dll"] = Test-Path (Join-Path $env:SystemRoot "System32/$dll")
         $result["bundled_$dll"] = Test-Path (Join-Path (Split-Path $executable) $dll)
     }
+    Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class DesktopShell {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "FindWindowW")]
+    public static extern IntPtr FindWindow(string className, string windowName);
+}
+'@
+    $result.sessionId = (Get-Process -Id $PID).SessionId
+    $result.userInteractive = [Environment]::UserInteractive
+    $result.trayAvailableInitially = [DesktopShell]::FindWindow('Shell_TrayWnd', $null) -ne [IntPtr]::Zero
+    if (-not $result.trayAvailableInitially) {
+        Start-Process explorer.exe
+        $deadline = (Get-Date).AddSeconds(20)
+        while ([DesktopShell]::FindWindow('Shell_TrayWnd', $null) -eq [IntPtr]::Zero -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 200
+        }
+    }
+    $result.trayAvailableAtLaunch = [DesktopShell]::FindWindow('Shell_TrayWnd', $null) -ne [IntPtr]::Zero
     $process = Start-Process $executable -WorkingDirectory (Split-Path $executable) -PassThru -RedirectStandardOutput (Join-Path $evidence 'launch-stdout.log') -RedirectStandardError (Join-Path $evidence 'launch-stderr.log')
     if ($process.WaitForExit(15000)) {
         $result.launchExitCode = $process.ExitCode
