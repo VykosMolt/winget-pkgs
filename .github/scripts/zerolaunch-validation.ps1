@@ -15,10 +15,19 @@ try {
         $release = Invoke-RestMethod 'https://api.github.com/repos/microsoft/winget-cli/releases/tags/v1.29.380' -Headers @{ Authorization = "Bearer $env:GITHUB_TOKEN" }
         $bundle = Join-Path $env:RUNNER_TEMP 'DesktopAppInstaller.msixbundle'
         $dependenciesZip = Join-Path $env:RUNNER_TEMP 'DesktopAppInstaller_Dependencies.zip'
+        $license = Join-Path $env:RUNNER_TEMP 'DesktopAppInstaller_License1.xml'
         $bundleAsset = $release.assets | Where-Object name -eq 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle'
         $dependenciesAsset = $release.assets | Where-Object name -eq 'DesktopAppInstaller_Dependencies.zip'
+        $licenseAsset = @($release.assets | Where-Object name -like '*_License1.xml')
+        if ($licenseAsset.Count -ne 1) { throw 'Expected the official release offline license' }
         Invoke-WebRequest $bundleAsset.browser_download_url -OutFile $bundle
         Invoke-WebRequest $dependenciesAsset.browser_download_url -OutFile $dependenciesZip
+        Invoke-WebRequest $licenseAsset[0].browser_download_url -OutFile $license
+        $result.wingetLicenseAsset = $licenseAsset[0].name
+        $result.wingetLicenseSha256 = (Get-FileHash $license -Algorithm SHA256).Hash
+        if ($result.wingetLicenseSha256 -ne 'BCB15118EC47DF24E3E6013A7006147C3A15B3A8104ED660FE87C8B4ED01F485') {
+            throw 'Official WinGet release license hash mismatch'
+        }
         $dependenciesDirectory = Join-Path $env:RUNNER_TEMP 'winget-dependencies'
         Expand-Archive $dependenciesZip $dependenciesDirectory
         $dependencies = @(Get-ChildItem $dependenciesDirectory -Recurse -File | Where-Object {
@@ -31,11 +40,29 @@ try {
         foreach ($dependency in $dependencies) {
             Add-AppxPackage -Path $dependency -ForceApplicationShutdown
         }
+        if ([Environment]::OSVersion.Version.Build -lt 22000) {
+            # Provision the signed Store license before registering the current user.
+            # DISM accepts repeated dependency arguments without WinPS array remoting.
+            $provisionDependencies = @(Get-ChildItem $dependenciesDirectory -Recurse -File | Where-Object {
+                $_.Extension -in @('.appx', '.msix') -and $_.FullName -match '[\\/](x64|x86)[\\/]'
+            } | Select-Object -ExpandProperty FullName)
+            $provisionArgs = @('/Online', '/Add-ProvisionedAppxPackage', "/PackagePath:$bundle", "/LicensePath:$license", '/Region:all')
+            foreach ($dependency in $provisionDependencies) {
+                $provisionArgs += "/DependencyPackagePath:$dependency"
+            }
+            & dism.exe @provisionArgs | Tee-Object -FilePath (Join-Path $evidence 'winget-provision.log')
+            $result.wingetProvisionExitCode = $LASTEXITCODE
+            if ($LASTEXITCODE -ne 0) { throw 'Official WinGet package/license provisioning failed' }
+        }
         Add-AppxPackage -Path $bundle -ForceApplicationShutdown
         $installation = Get-AppxPackage -Name Microsoft.DesktopAppInstaller
         if (-not $installation) { throw 'WinGet package was not registered' }
         $env:PATH = "$($installation.InstallLocation);$env:PATH"
     }
+    foreach ($credential in @('GITHUB_TOKEN', 'GH_TOKEN', 'ACTIONS_RUNTIME_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN')) {
+        Remove-Item -LiteralPath "Env:$credential" -ErrorAction SilentlyContinue
+    }
+    $result.githubTokenRemovedBeforeLaunch = -not (Test-Path Env:GITHUB_TOKEN)
     winget --info
     if ($LASTEXITCODE -ne 0) { throw 'winget bootstrap failed' }
     winget settings --enable LocalManifestFiles
@@ -85,10 +112,27 @@ using System.Runtime.InteropServices;
 public static class DesktopShell {
     [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "FindWindowW")]
     public static extern IntPtr FindWindow(string className, string windowName);
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetProcessWindowStation();
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetThreadDesktop(uint threadId);
+    [DllImport("kernel32.dll")]
+    public static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool GetUserObjectInformation(IntPtr handle, int index, System.Text.StringBuilder value, int length, out int needed);
+    public static string ObjectName(IntPtr handle) {
+        var value = new System.Text.StringBuilder(256);
+        int needed;
+        return GetUserObjectInformation(handle, 2, value, value.Capacity * 2, out needed) ? value.ToString() : null;
+    }
 }
 '@
     $result.sessionId = (Get-Process -Id $PID).SessionId
     $result.userInteractive = [Environment]::UserInteractive
+    $result.windowStation = [DesktopShell]::ObjectName([DesktopShell]::GetProcessWindowStation())
+    $result.desktop = [DesktopShell]::ObjectName([DesktopShell]::GetThreadDesktop([DesktopShell]::GetCurrentThreadId()))
     $result.trayAvailableInitially = [DesktopShell]::FindWindow('Shell_TrayWnd', $null) -ne [IntPtr]::Zero
     if (-not $result.trayAvailableInitially) {
         Start-Process explorer.exe
@@ -98,6 +142,11 @@ public static class DesktopShell {
         }
     }
     $result.trayAvailableAtLaunch = [DesktopShell]::FindWindow('Shell_TrayWnd', $null) -ne [IntPtr]::Zero
+    $trayProcess = [uint32]0
+    [DesktopShell]::GetWindowThreadProcessId([DesktopShell]::FindWindow('Shell_TrayWnd', $null), [ref]$trayProcess) | Out-Null
+    $result.trayProcessId = $trayProcess
+    $result.explorerProcesses = @(Get-Process explorer -ErrorAction SilentlyContinue | Where-Object SessionId -eq $result.sessionId | Select-Object Id, SessionId, Responding)
+    $env:RUST_BACKTRACE = 'full'
     $process = Start-Process $executable -WorkingDirectory (Split-Path $executable) -PassThru -RedirectStandardOutput (Join-Path $evidence 'launch-stdout.log') -RedirectStandardError (Join-Path $evidence 'launch-stderr.log')
     if ($process.WaitForExit(15000)) {
         $result.launchExitCode = $process.ExitCode
@@ -113,6 +162,12 @@ public static class DesktopShell {
     $_ | Out-String | Set-Content (Join-Path $evidence 'error.log')
     throw
 } finally {
+    $applicationLogs = Join-Path $env:APPDATA 'ZeroLaunch-rs/logs'
+    if (Test-Path $applicationLogs) {
+        $logsDestination = Join-Path $evidence 'application-logs'
+        New-Item -ItemType Directory -Path $logsDestination -Force | Out-Null
+        Get-ChildItem $applicationLogs -File -ErrorAction SilentlyContinue | Copy-Item -Destination $logsDestination -ErrorAction Continue
+    }
     $result | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $evidence 'result.json')
     Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = (Get-Date).AddMinutes(-30) } -ErrorAction SilentlyContinue | Select-Object TimeCreated, Id, ProviderName, Message | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $evidence 'application-events.json')
 }
