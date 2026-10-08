@@ -14,7 +14,7 @@ try {
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         Install-Module -Name Microsoft.WinGet.Client -Scope CurrentUser -Force -Repository PSGallery
         Import-Module Microsoft.WinGet.Client
-        Repair-WinGetPackageManager -AllUsers
+        Repair-WinGetPackageManager -AllUsers -Version '1.29.380' -Force -Verbose
     }
     winget --info
     if ($LASTEXITCODE -ne 0) { throw 'winget bootstrap failed' }
@@ -27,7 +27,9 @@ try {
     python -m pip install --disable-pip-version-check PyYAML
     if ($LASTEXITCODE -ne 0) { throw 'Could not install manifest parser' }
     $installerManifest = Join-Path $manifest 'ghost-him.ZeroLaunch-rs.installer.yaml'
-    $data = python -c 'import json,sys,yaml; print(json.dumps(yaml.safe_load(open(sys.argv[1],encoding="utf-8"))))' $installerManifest | ConvertFrom-Json
+    $parsed = python -c 'import json,sys,yaml; print(json.dumps(yaml.safe_load(open(sys.argv[1],encoding="utf-8")),default=str))' $installerManifest
+    if ($LASTEXITCODE -ne 0) { throw 'Could not parse installer manifest' }
+    $data = $parsed | ConvertFrom-Json
     $entry = $data.Installers | Where-Object Architecture -eq $env:TARGET_ARCHITECTURE
     if (@($entry).Count -ne 1) { throw 'Expected exactly one matching installer' }
     $msi = Join-Path $evidence 'installer.msi'

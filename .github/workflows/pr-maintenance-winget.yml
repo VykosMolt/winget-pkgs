@@ -32,6 +32,7 @@ jobs:
         shell: pwsh
         env:
           TARGET_ARCHITECTURE: ${{ matrix.architecture }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./.github/scripts/zerolaunch-validation.ps1
       - name: Save validation evidence
         if: always()
