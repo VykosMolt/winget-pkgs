@@ -28,7 +28,10 @@ try {
         if ([Environment]::OSVersion.Version.Build -lt 22000) {
             Import-Module Appx -UseWindowsPowerShell
         }
-        Add-AppxPackage -Path $bundle -DependencyPath $dependencies
+        foreach ($dependency in $dependencies) {
+            Add-AppxPackage -Path $dependency -ForceApplicationShutdown
+        }
+        Add-AppxPackage -Path $bundle -ForceApplicationShutdown
         $installation = Get-AppxPackage -Name Microsoft.DesktopAppInstaller
         if (-not $installation) { throw 'WinGet package was not registered' }
         $env:PATH = "$($installation.InstallLocation);$env:PATH"
