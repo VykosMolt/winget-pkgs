@@ -10,6 +10,7 @@ $result = [ordered]@{
     nativeArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
 }
 $desktopDiagnosticsReady = $false
+$wingetBootstrapped = $false
 
 try {
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
@@ -59,6 +60,7 @@ try {
         $installation = Get-AppxPackage -Name Microsoft.DesktopAppInstaller
         if (-not $installation) { throw 'WinGet package was not registered' }
         $env:PATH = "$($installation.InstallLocation);$env:PATH"
+        $wingetBootstrapped = $true
     }
     foreach ($credential in @('GITHUB_TOKEN', 'GH_TOKEN', 'ACTIONS_RUNTIME_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN')) {
         Remove-Item -LiteralPath "Env:$credential" -ErrorAction SilentlyContinue
@@ -193,7 +195,13 @@ public static class DesktopShell {
     $result.windowStation = [DesktopShell]::ObjectName([DesktopShell]::GetProcessWindowStation())
     $result.desktop = [DesktopShell]::ObjectName([DesktopShell]::GetThreadDesktop([DesktopShell]::GetCurrentThreadId()))
     $result.trayAvailableInitially = [DesktopShell]::FindWindow('Shell_TrayWnd', $null) -ne [IntPtr]::Zero
-    if (-not $result.trayAvailableInitially) {
+    if ($wingetBootstrapped -and $env:TARGET_ARCHITECTURE -eq 'arm64') {
+        # Updating the WinGet frameworks can close dependent desktop components.
+        # Restore the actual Explorer shell before the first app launch.
+        Get-Process explorer -ErrorAction SilentlyContinue | Where-Object SessionId -eq $result.sessionId | Stop-Process -Force
+        $result.explorerRestartedAfterBootstrap = $true
+    }
+    if (-not $result.trayAvailableInitially -or $result.explorerRestartedAfterBootstrap) {
         Start-Process explorer.exe
         $deadline = (Get-Date).AddSeconds(20)
         while ([DesktopShell]::FindWindow('Shell_TrayWnd', $null) -eq [IntPtr]::Zero -and (Get-Date) -lt $deadline) {
