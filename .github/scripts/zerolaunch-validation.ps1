@@ -9,6 +9,7 @@ $result = [ordered]@{
     os = [Environment]::OSVersion.VersionString
     nativeArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
 }
+$desktopDiagnosticsReady = $false
 
 try {
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
@@ -127,8 +128,66 @@ public static class DesktopShell {
         int needed;
         return GetUserObjectInformation(handle, 2, value, value.Capacity * 2, out needed) ? value.ToString() : null;
     }
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateWindowEx(uint styleEx, string className, string windowName, uint style, int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr parameter);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool DestroyWindow(IntPtr window);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr LoadIcon(IntPtr instance, IntPtr iconName);
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool Shell_NotifyIcon(uint message, ref NotifyIconData data);
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct NotifyIconData {
+        public uint size;
+        public IntPtr window;
+        public uint id;
+        public uint flags;
+        public uint callback;
+        public IntPtr icon;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string tip;
+        public uint state;
+        public uint stateMask;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string info;
+        public uint timeoutOrVersion;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)] public string infoTitle;
+        public uint infoFlags;
+        public Guid guid;
+        public IntPtr balloonIcon;
+    }
+    public sealed class TrayProbeResult {
+        public bool WindowCreated { get; set; }
+        public bool Added { get; set; }
+        public int NativeError { get; set; }
+        public int NativeDataSize { get; set; }
+    }
+    public static TrayProbeResult ProbeNotification() {
+        var result = new TrayProbeResult();
+        var window = CreateWindowEx(0, "STATIC", "ZeroLaunch validation probe", 0, 0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+        result.WindowCreated = window != IntPtr.Zero;
+        if (!result.WindowCreated) {
+            result.NativeError = Marshal.GetLastWin32Error();
+            return result;
+        }
+        var data = new NotifyIconData();
+        data.size = (uint)Marshal.SizeOf(typeof(NotifyIconData));
+        data.window = window;
+        data.id = 1;
+        data.flags = 2 | 4;
+        data.icon = LoadIcon(IntPtr.Zero, new IntPtr(32512));
+        data.tip = "ZeroLaunch validation probe";
+        result.NativeDataSize = (int)data.size;
+        try {
+            result.Added = Shell_NotifyIcon(0, ref data);
+            result.NativeError = result.Added ? 0 : Marshal.GetLastWin32Error();
+            return result;
+        } finally {
+            if (result.Added) { Shell_NotifyIcon(2, ref data); }
+            DestroyWindow(window);
+        }
+    }
 }
 '@
+    $desktopDiagnosticsReady = $true
     $result.sessionId = (Get-Process -Id $PID).SessionId
     $result.userInteractive = [Environment]::UserInteractive
     $result.windowStation = [DesktopShell]::ObjectName([DesktopShell]::GetProcessWindowStation())
@@ -162,6 +221,12 @@ public static class DesktopShell {
     $_ | Out-String | Set-Content (Join-Path $evidence 'error.log')
     throw
 } finally {
+    if ($desktopDiagnosticsReady) {
+        # Probe the real notification API only after the app attempt; this cannot
+        # prepare the desktop for its first launch or replace a failed result.
+        try { $result.systemTrayProbeAfterLaunch = [DesktopShell]::ProbeNotification() }
+        catch { $result.systemTrayProbeError = $_.Exception.Message }
+    }
     $applicationLogs = Join-Path $env:APPDATA 'ZeroLaunch-rs/logs'
     if (Test-Path $applicationLogs) {
         $logsDestination = Join-Path $evidence 'application-logs'
