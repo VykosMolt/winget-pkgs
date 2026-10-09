@@ -1,3 +1,5 @@
+param([switch]$NotificationControl)
+
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $evidence = Join-Path $env:RUNNER_TEMP 'zerolaunch-evidence'
@@ -12,6 +14,28 @@ $result = [ordered]@{
 }
 $desktopDiagnosticsReady = $false
 $wingetBootstrapped = $false
+
+if ($NotificationControl) {
+    $tokens = $null
+    $parseErrors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile($PSCommandPath, [ref]$tokens, [ref]$parseErrors) | Out-Null
+    if ($parseErrors.Count) { throw 'Could not parse the native notification probe' }
+    $definition = $tokens | Where-Object {
+        $_.Kind -eq [System.Management.Automation.Language.TokenKind]::HereStringLiteral -and $_.Value -like '*public static class DesktopShell*'
+    }
+    Add-Type -TypeDefinition $definition.Value -ErrorAction Stop
+    $result.notificationControlWithoutTargetApp = $true
+    $result.sessionId = (Get-Process -Id $PID).SessionId
+    $result.userInteractive = [Environment]::UserInteractive
+    $result.windowStation = [DesktopShell]::ObjectName([DesktopShell]::GetProcessWindowStation())
+    $result.desktop = [DesktopShell]::ObjectName([DesktopShell]::GetThreadDesktop([DesktopShell]::GetCurrentThreadId()))
+    $result.trayAvailableInitially = [DesktopShell]::FindWindow('Shell_TrayWnd', $null) -ne [IntPtr]::Zero
+    $result.systemTrayProbe = [DesktopShell]::ProbeNotification()
+    $result.passed = $result.systemTrayProbe.Added
+    $result | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $evidence 'result.json')
+    if (-not $result.passed) { throw 'Native notification control failed without target app or bootstrap changes' }
+    exit 0
+}
 
 try {
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
