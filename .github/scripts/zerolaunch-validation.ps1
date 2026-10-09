@@ -29,9 +29,10 @@ try {
         }
     }
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        # This stable client supports manifest1.10 without replacing Runtime1.8.
-        $release = Invoke-RestMethod 'https://api.github.com/repos/microsoft/winget-cli/releases/tags/v1.11.430' -Headers @{ Authorization = "Bearer $env:GITHUB_TOKEN" }
-        $result.wingetBootstrapMode = 'official stable v1.11.430'
+        # Preserve Runtime1.8 on ARM; Server2022 needs the proven licensed client.
+        $wingetReleaseTag = if ($env:TARGET_ARCHITECTURE -eq 'arm64') { 'v1.11.430' } else { 'v1.29.380' }
+        $release = Invoke-RestMethod "https://api.github.com/repos/microsoft/winget-cli/releases/tags/$wingetReleaseTag" -Headers @{ Authorization = "Bearer $env:GITHUB_TOKEN" }
+        $result.wingetBootstrapMode = "official stable $wingetReleaseTag"
         $bundle = Join-Path $env:RUNNER_TEMP 'DesktopAppInstaller.msixbundle'
         $dependenciesZip = Join-Path $env:RUNNER_TEMP 'DesktopAppInstaller_Dependencies.zip'
         $license = Join-Path $env:RUNNER_TEMP 'DesktopAppInstaller_License1.xml'
