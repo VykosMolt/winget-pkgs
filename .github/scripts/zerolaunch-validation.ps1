@@ -8,13 +8,30 @@ $result = [ordered]@{
     architecture = $env:TARGET_ARCHITECTURE
     os = [Environment]::OSVersion.VersionString
     nativeArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+    validationProcessArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()
 }
 $desktopDiagnosticsReady = $false
 $wingetBootstrapped = $false
 
 try {
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        $release = Invoke-RestMethod 'https://api.github.com/repos/microsoft/winget-cli/releases/tags/v1.29.380' -Headers @{ Authorization = "Bearer $env:GITHUB_TOKEN" }
+        if ([Environment]::OSVersion.Version.Build -lt 22000) {
+            Import-Module Appx -UseWindowsPowerShell
+        }
+        $existing = Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue | Where-Object {
+            $_.PackageFullName -like "*_$($env:TARGET_ARCHITECTURE)_*"
+        } | Sort-Object Version -Descending | Select-Object -First 1
+        if ($existing -and (Test-Path (Join-Path $existing.InstallLocation 'winget.exe'))) {
+            $result.imageAppInstallerPackage = $existing.PackageFullName
+            Add-AppxPackage -Register (Join-Path $existing.InstallLocation 'AppxManifest.xml') -DisableDevelopmentMode
+            $env:PATH = "$($existing.InstallLocation);$env:PATH"
+            $result.wingetBootstrapMode = 'registered image package'
+        }
+    }
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        # This stable client supports manifest1.10 without replacing Runtime1.8.
+        $release = Invoke-RestMethod 'https://api.github.com/repos/microsoft/winget-cli/releases/tags/v1.11.430' -Headers @{ Authorization = "Bearer $env:GITHUB_TOKEN" }
+        $result.wingetBootstrapMode = 'official stable v1.11.430'
         $bundle = Join-Path $env:RUNNER_TEMP 'DesktopAppInstaller.msixbundle'
         $dependenciesZip = Join-Path $env:RUNNER_TEMP 'DesktopAppInstaller_Dependencies.zip'
         $license = Join-Path $env:RUNNER_TEMP 'DesktopAppInstaller_License1.xml'
@@ -40,7 +57,18 @@ try {
             Import-Module Appx -UseWindowsPowerShell
         }
         foreach ($dependency in $dependencies) {
-            Add-AppxPackage -Path $dependency -ForceApplicationShutdown
+            $identity = [regex]::Match((Split-Path $dependency -Leaf), '^(?<name>.+)_(?<version>\d+(?:\.\d+){3})_(?<arch>[^_]+)\.(?:appx|msix)$')
+            $satisfied = $null
+            if ($identity.Success) {
+                $satisfied = Get-AppxPackage -Name $identity.Groups['name'].Value -ErrorAction SilentlyContinue | Where-Object {
+                    $_.PackageFullName -like "*_$($env:TARGET_ARCHITECTURE)_*" -and [version]$_.Version -ge [version]$identity.Groups['version'].Value
+                }
+            }
+            if ($satisfied) {
+                $result.wingetFrameworksReused = @($result.wingetFrameworksReused) + (Split-Path $dependency -Leaf)
+            } else {
+                Add-AppxPackage -Path $dependency -ForceApplicationShutdown
+            }
         }
         if ([Environment]::OSVersion.Version.Build -lt 22000) {
             # Provision the signed Store license before registering the current user.
@@ -134,7 +162,7 @@ public static class DesktopShell {
     private static extern IntPtr CreateWindowEx(uint styleEx, string className, string windowName, uint style, int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr parameter);
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool DestroyWindow(IntPtr window);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr LoadIcon(IntPtr instance, IntPtr iconName);
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool Shell_NotifyIcon(uint message, ref NotifyIconData data);
@@ -158,6 +186,7 @@ public static class DesktopShell {
     }
     public sealed class TrayProbeResult {
         public bool WindowCreated { get; set; }
+        public bool IconLoaded { get; set; }
         public bool Added { get; set; }
         public int NativeError { get; set; }
         public int NativeDataSize { get; set; }
@@ -176,6 +205,7 @@ public static class DesktopShell {
         data.id = 1;
         data.flags = 2 | 4;
         data.icon = LoadIcon(IntPtr.Zero, new IntPtr(32512));
+        result.IconLoaded = data.icon != IntPtr.Zero;
         data.tip = "ZeroLaunch validation probe";
         result.NativeDataSize = (int)data.size;
         try {
