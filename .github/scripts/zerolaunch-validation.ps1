@@ -119,7 +119,7 @@ try {
         Remove-Item -LiteralPath "Env:$credential" -ErrorAction SilentlyContinue
     }
     $result.githubTokenRemovedBeforeLaunch = -not (Test-Path Env:GITHUB_TOKEN)
-    $wingetExecutable = (Get-Command winget -CommandType Application -ErrorAction Stop).Source
+    $wingetExecutable = (Get-Command winget -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
     $result.wingetExecutable = $wingetExecutable
     & $wingetExecutable --info
     if ($LASTEXITCODE -ne 0) { throw 'winget bootstrap failed' }
