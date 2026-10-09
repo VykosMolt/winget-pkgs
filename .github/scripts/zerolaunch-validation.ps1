@@ -119,11 +119,13 @@ try {
         Remove-Item -LiteralPath "Env:$credential" -ErrorAction SilentlyContinue
     }
     $result.githubTokenRemovedBeforeLaunch = -not (Test-Path Env:GITHUB_TOKEN)
-    winget --info
+    $wingetExecutable = (Get-Command winget -CommandType Application -ErrorAction Stop).Source
+    $result.wingetExecutable = $wingetExecutable
+    & $wingetExecutable --info
     if ($LASTEXITCODE -ne 0) { throw 'winget bootstrap failed' }
-    winget settings --enable LocalManifestFiles
+    & $wingetExecutable settings --enable LocalManifestFiles
     if ($LASTEXITCODE -ne 0) { throw 'Could not enable local manifest validation' }
-    winget validate --manifest $manifest
+    & $wingetExecutable validate --manifest $manifest
     $result.validateExitCode = $LASTEXITCODE
     if ($LASTEXITCODE -ne 0) { throw 'Manifest validation failed' }
 
@@ -152,7 +154,7 @@ try {
     if ($result.ProductCode -ne $entry.ProductCode) { throw 'Installer ProductCode mismatch' }
     if ($result.ProductVersion -ne $data.PackageVersion) { throw 'Installer ProductVersion mismatch' }
 
-    winget install --manifest $manifest --silent --accept-source-agreements --accept-package-agreements --disable-interactivity --log (Join-Path $evidence 'winget-install.log')
+    & $wingetExecutable install --manifest $manifest --silent --accept-source-agreements --accept-package-agreements --disable-interactivity --log (Join-Path $evidence 'winget-install.log')
     $result.installExitCode = $LASTEXITCODE
     if ($LASTEXITCODE -ne 0) { throw 'Manifest installation failed' }
     $executable = Join-Path $env:ProgramFiles 'zerolaunch-rs/zerolaunch-rs.exe'
